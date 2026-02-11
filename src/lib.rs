@@ -794,6 +794,276 @@ pub fn print_image_info(info: &ImageInfo) {
 }
 
 // ---------------------------------------------------------------------------
+// FIT image listing
+// ---------------------------------------------------------------------------
+
+/// Whether this image type should display the Architecture field.
+fn fit_type_shows_arch(t: ImageType) -> bool {
+    matches!(
+        t,
+        ImageType::Kernel
+            | ImageType::KernelNoload
+            | ImageType::Standalone
+            | ImageType::Ramdisk
+            | ImageType::Firmware
+            | ImageType::FirmwareIvt
+            | ImageType::FlatDt
+            | ImageType::FdtLegacy
+            | ImageType::Fpga
+            | ImageType::Tee
+    )
+}
+
+/// Whether this image type should display the OS field.
+fn fit_type_shows_os(t: ImageType) -> bool {
+    matches!(
+        t,
+        ImageType::Kernel
+            | ImageType::KernelNoload
+            | ImageType::Standalone
+            | ImageType::Ramdisk
+    )
+}
+
+/// Whether this image type should display Load Address.
+fn fit_type_shows_load(t: ImageType) -> bool {
+    matches!(
+        t,
+        ImageType::Kernel
+            | ImageType::KernelNoload
+            | ImageType::Standalone
+            | ImageType::Ramdisk
+            | ImageType::Firmware
+            | ImageType::FirmwareIvt
+            | ImageType::FlatDt
+            | ImageType::FdtLegacy
+    )
+}
+
+/// Whether this image type should display Entry Point.
+fn fit_type_shows_entry(t: ImageType) -> bool {
+    matches!(
+        t,
+        ImageType::Kernel
+            | ImageType::KernelNoload
+            | ImageType::Standalone
+            | ImageType::Ramdisk
+    )
+}
+
+/// Read a big-endian u32 from a DTB property, if present and large enough.
+fn fdt_prop_u32(data: &[u8], node: usize, name: &str) -> Option<u32> {
+    let prop = dtb::fdt_getprop(data, node, name)?;
+    if prop.len() >= 4 {
+        Some(u32::from_be_bytes(prop[..4].try_into().unwrap()))
+    } else {
+        None
+    }
+}
+
+/// Format a Unix timestamp to match U-Boot's output.
+fn format_timestamp(ts: u32) -> Option<String> {
+    chrono::DateTime::from_timestamp(ts as i64, 0)
+        .map(|dt| dt.format("%a %b %d %H:%M:%S %Y").to_string())
+}
+
+/// Print hash-* sub-nodes of a given parent node.
+fn print_fit_hash_subnodes(data: &[u8], parent: usize) {
+    let mut node = dtb::fdt_first_subnode(data, parent);
+    while let Some(off) = node {
+        let name = dtb::fdt_get_name(data, off);
+        if name.starts_with("hash") {
+            if let Some(algo) = dtb::fdt_getprop_str(data, off, "algo") {
+                println!("  {:<14}{}", "Hash algo:", algo);
+            }
+            if let Some(value) = dtb::fdt_getprop(data, off, "value") {
+                let hex: String = value.iter().map(|b| format!("{:02x}", b)).collect();
+                println!("  {:<14}{}", "Hash value:", hex);
+            } else {
+                println!("  {:<14}unavailable", "Hash value:");
+            }
+        }
+        node = dtb::fdt_next_subnode(data, off);
+    }
+}
+
+/// Print FIT image information from a buffer, matching `dumpimage -l` output.
+pub fn print_fit_image_info_bytes(data: &[u8]) -> Result<()> {
+    dtb::fdt_check_header(data)?;
+
+    let root = dtb::fdt_path_offset(data, "/")
+        .ok_or_else(|| MkImageError::Other("no root node in FIT".into()))?;
+
+    // FIT description
+    if let Some(desc) = dtb::fdt_getprop_str(data, root, "description") {
+        println!("FIT description: {}", desc);
+    }
+
+    // Root timestamp
+    if let Some(ts) = fdt_prop_u32(data, root, "timestamp") {
+        if let Some(s) = format_timestamp(ts) {
+            println!("{:<17}{}", "Created:", s);
+        }
+    }
+
+    // ---- /images ----
+    if let Some(images_off) = dtb::fdt_path_offset(data, "/images") {
+        let mut idx = 0u32;
+        let mut node = dtb::fdt_first_subnode(data, images_off);
+        while let Some(off) = node {
+            let name = dtb::fdt_get_name(data, off);
+            println!(" Image {} ({})", idx, name);
+
+            if let Some(desc) = dtb::fdt_getprop_str(data, off, "description") {
+                println!("  {:<14}{}", "Description:", desc);
+            }
+            if let Some(ts) = fdt_prop_u32(data, off, "timestamp") {
+                if let Some(s) = format_timestamp(ts) {
+                    println!("  {:<14}{}", "Created:", s);
+                }
+            }
+
+            // Resolve image type for conditional field display
+            let img_type = dtb::fdt_getprop_str(data, off, "type")
+                .and_then(ImageType::from_name);
+
+            if let Some(type_str) = dtb::fdt_getprop_str(data, off, "type") {
+                let long = ImageType::from_name(type_str)
+                    .map(|t| t.long_name())
+                    .unwrap_or(type_str);
+                println!("  {:<14}{}", "Type:", long);
+            }
+            if let Some(comp_str) = dtb::fdt_getprop_str(data, off, "compression") {
+                let long = Compression::from_name(comp_str)
+                    .map(|c| c.long_name())
+                    .unwrap_or(comp_str);
+                println!("  {:<14}{}", "Compression:", long);
+            }
+
+            // Data Size — try "data" property length, fall back to "data-size"
+            let data_size = dtb::fdt_getprop(data, off, "data")
+                .map(|d| d.len() as u32)
+                .or_else(|| fdt_prop_u32(data, off, "data-size"));
+            if let Some(sz) = data_size {
+                println!(
+                    "  {:<14}{} Bytes = {:.2} KiB = {:.2} MiB",
+                    "Data Size:",
+                    sz,
+                    sz as f64 / 1024.0,
+                    sz as f64 / (1024.0 * 1024.0),
+                );
+            }
+
+            // Conditional fields based on image type
+            let show = img_type.unwrap_or(ImageType::Invalid);
+
+            if fit_type_shows_arch(show) {
+                if let Some(arch_str) = dtb::fdt_getprop_str(data, off, "arch") {
+                    let long = Arch::from_name_ext(arch_str)
+                        .map(|a| a.long_name())
+                        .unwrap_or(arch_str);
+                    println!("  {:<14}{}", "Architecture:", long);
+                }
+            }
+            if fit_type_shows_os(show) {
+                if let Some(os_str) = dtb::fdt_getprop_str(data, off, "os") {
+                    let long = Os::from_name(os_str)
+                        .map(|o| o.long_name())
+                        .unwrap_or(os_str);
+                    println!("  {:<14}{}", "OS:", long);
+                }
+            }
+            if fit_type_shows_load(show) {
+                if let Some(load) = fdt_prop_u32(data, off, "load") {
+                    println!("  {:<14}0x{:08x}", "Load Address:", load);
+                }
+            }
+            if fit_type_shows_entry(show) {
+                if let Some(entry) = fdt_prop_u32(data, off, "entry") {
+                    println!("  {:<14}0x{:08x}", "Entry Point:", entry);
+                }
+            }
+
+            // Hash sub-nodes
+            print_fit_hash_subnodes(data, off);
+
+            idx += 1;
+            node = dtb::fdt_next_subnode(data, off);
+        }
+    }
+
+    // ---- /configurations ----
+    if let Some(configs_off) = dtb::fdt_path_offset(data, "/configurations") {
+        if let Some(default) = dtb::fdt_getprop_str(data, configs_off, "default") {
+            println!(" Default Configuration: '{}'", default);
+        }
+
+        let mut idx = 0u32;
+        let mut node = dtb::fdt_first_subnode(data, configs_off);
+        while let Some(off) = node {
+            let name = dtb::fdt_get_name(data, off);
+            println!(" Configuration {} ({})", idx, name);
+
+            if let Some(desc) = dtb::fdt_getprop_str(data, off, "description") {
+                println!("  {:<14}{}", "Description:", desc);
+            }
+
+            let kernel = dtb::fdt_getprop_str(data, off, "kernel")
+                .unwrap_or("unavailable");
+            println!("  {:<14}{}", "Kernel:", kernel);
+
+            let fdt = dtb::fdt_getprop_str(data, off, "fdt")
+                .unwrap_or("unavailable");
+            println!("  {:<14}{}", "FDT:", fdt);
+
+            // Hash sub-nodes (value typically unavailable for configs)
+            print_fit_hash_subnodes(data, off);
+
+            idx += 1;
+            node = dtb::fdt_next_subnode(data, off);
+        }
+    }
+
+    Ok(())
+}
+
+/// Print FIT image information from a file.
+pub fn print_fit_image_info(path: impl AsRef<Path>) -> Result<()> {
+    let data = fs::read(path.as_ref())?;
+    print_fit_image_info_bytes(&data)
+}
+
+// ---------------------------------------------------------------------------
+// Auto-detecting image listing
+// ---------------------------------------------------------------------------
+
+/// Auto-detect image format (legacy uImage or FIT) and print information.
+///
+/// This is the primary library entry point for listing image contents, used
+/// by `dumpimage -l`.
+pub fn list_image(path: impl AsRef<Path>) -> Result<()> {
+    let data = fs::read(path.as_ref())?;
+    list_image_bytes(&data)
+}
+
+/// Same as [`list_image`] but works on an in-memory buffer.
+pub fn list_image_bytes(data: &[u8]) -> Result<()> {
+    if data.len() < 4 {
+        return Err(MkImageError::TooSmall { size: data.len(), min: 4 });
+    }
+    let magic = u32::from_be_bytes(data[..4].try_into().unwrap());
+    if magic == IH_MAGIC {
+        let info = read_image_bytes(data)?;
+        print_image_info(&info);
+        Ok(())
+    } else if magic == dtb::FDT_MAGIC {
+        print_fit_image_info_bytes(data)
+    } else {
+        Err(MkImageError::BadMagic)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Image creation
 // ---------------------------------------------------------------------------
 
@@ -1044,6 +1314,58 @@ pub fn verify_image(path: impl AsRef<Path>) -> Result<ImageInfo> {
 }
 
 // ---------------------------------------------------------------------------
+// Sub-image extraction (dumpimage support)
+// ---------------------------------------------------------------------------
+
+/// Extract a sub-image from a legacy U-Boot image buffer.
+///
+/// For single-file images, `position` 0 returns the data payload.
+/// For multi-file images, `position` selects which component to extract.
+pub fn extract_subimage_bytes(data: &[u8], position: usize) -> Result<&[u8]> {
+    let info = read_image_bytes(data)?;
+
+    if info.sub_images.is_empty() {
+        // Single-file image — only position 0 is valid
+        if position != 0 {
+            return Err(MkImageError::Other(format!(
+                "no sub-image at position {position}"
+            )));
+        }
+        let start = LEGACY_HEADER_SIZE;
+        let end = start + info.header.ih_size as usize;
+        Ok(&data[start..end])
+    } else {
+        // Multi-file image
+        if position >= info.sub_images.len() {
+            return Err(MkImageError::Other(format!(
+                "no sub-image at position {position} (image has {} components)",
+                info.sub_images.len()
+            )));
+        }
+        let (offset, size) = info.sub_images[position];
+        let start = offset as usize;
+        let end = start + size as usize;
+        Ok(&data[start..end])
+    }
+}
+
+/// Extract a sub-image from a legacy U-Boot image file and write it to an
+/// output file.
+///
+/// This is the file-based convenience wrapper around
+/// [`extract_subimage_bytes`].
+pub fn extract_subimage(
+    image_path: impl AsRef<Path>,
+    position: usize,
+    output_path: impl AsRef<Path>,
+) -> Result<()> {
+    let data = fs::read(image_path.as_ref())?;
+    let sub = extract_subimage_bytes(&data, position)?;
+    fs::write(output_path.as_ref(), sub)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1147,5 +1469,52 @@ mod tests {
         let table = ImageType::table();
         assert!(table.len() > 10);
         assert!(table.iter().any(|&(_, short, _)| short == "kernel"));
+    }
+
+    #[test]
+    fn extract_single_image() {
+        let params = ImageParams::builder()
+            .os(Os::Linux)
+            .arch(Arch::Arm)
+            .image_type(ImageType::Kernel)
+            .compression(Compression::None)
+            .load_addr(0x80008000)
+            .entry_point(0x80008000)
+            .name("extract test")
+            .build();
+
+        let data = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x12, 0x34];
+        let image = create_image_bytes(&params, &data).unwrap();
+        let extracted = extract_subimage_bytes(&image, 0).unwrap();
+        assert_eq!(extracted, &data[..]);
+
+        // Position 1 should fail on single-file image
+        assert!(extract_subimage_bytes(&image, 1).is_err());
+    }
+
+    #[test]
+    fn extract_multi_image() {
+        let params = ImageParams::builder()
+            .os(Os::Linux)
+            .arch(Arch::Arm)
+            .image_type(ImageType::Multi)
+            .compression(Compression::None)
+            .load_addr(0x80008000)
+            .name("multi extract")
+            .build();
+
+        let file0 = vec![1u8, 2, 3, 4, 5];
+        let file1 = vec![10u8, 20, 30];
+        let files = vec![file0.clone(), file1.clone()];
+        let image = create_multi_image_bytes(&params, &files).unwrap();
+
+        let ext0 = extract_subimage_bytes(&image, 0).unwrap();
+        assert_eq!(ext0, &file0[..]);
+
+        let ext1 = extract_subimage_bytes(&image, 1).unwrap();
+        assert_eq!(ext1, &file1[..]);
+
+        // Out of range
+        assert!(extract_subimage_bytes(&image, 2).is_err());
     }
 }
