@@ -1,0 +1,35 @@
+[package]
+name = "mkimage-rs"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust rewrite of U-Boot's mkimage tool"
+license = "GPL-2.0+"
+
+[lib]
+name = "mkimage"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mkimage"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+crc32fast = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+thiserror = "2"
+
+# Crypto — all pure Rust, no OpenSSL
+sha1 = { version = "0.10", features = ["oid"] }
+sha2 = { version = "0.10", features = ["oid"] }
+rsa = "0.9"
+p256 = { version = "0.13", features = ["ecdsa"] }
+p384 = { version = "0.13", features = ["ecdsa"] }
+pkcs8 = { version = "0.10", features = ["pem", "std"] }
+pkcs1 = { version = "0.7", features = ["pem", "std"] }
+signature = "2"
+digest = "0.10"
+rand = "0.8"
+
+[build-dependencies]
+cc = "1.2.55"
