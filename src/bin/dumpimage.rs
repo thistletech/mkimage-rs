@@ -35,6 +35,9 @@ struct Cli {
 }
 
 fn main() {
+    if std::env::var("DEBUG-MKIMAGE").is_err() {
+        std::env::set_var("DEBUG-MKIMAGE", "1");
+    }
     let cli = Cli::parse();
 
     // -l and -o are mutually exclusive

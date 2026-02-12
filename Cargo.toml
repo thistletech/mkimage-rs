@@ -9,14 +9,6 @@ license = "GPL-2.0+"
 name = "mkimage"
 path = "src/lib.rs"
 
-[[bin]]
-name = "mkimage"
-path = "src/main.rs"
-
-[[bin]]
-name = "dumpimage"
-path = "src/dumpimage.rs"
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 crc32fast = "1"

@@ -10,11 +10,12 @@ release:: lint
 lint::
 	cargo fmt --all
 
-run:: lint
+run:: build
 	cd test-vector && .././target/debug/mkimage -f signed.its -k keys2k -r fit
 	cd test-vector && .././target/debug/dumpimage -l fit
+	shasum test-vector/fit test-vector/targetFit
 
 test::
 	cargo test
 
-ci:: lint test release
+ci:: lint test

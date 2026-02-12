@@ -123,6 +123,9 @@ fn show_valid<F: Fn() -> &'static [(u8, &'static str, &'static str)]>(category: 
 }
 
 fn main() {
+    if std::env::var("DEBUG-MKIMAGE").is_err() {
+        std::env::set_var("DEBUG-MKIMAGE", "1");
+    }
     let cli = Cli::parse();
 
     // Handle "-T list"
