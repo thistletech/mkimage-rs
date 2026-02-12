@@ -65,18 +65,21 @@ fn run_dtc(dtc_opts: &str, output: &str, input: &str) -> Result<()> {
     args.push(output.into());
     args.push(input.into());
 
-    eprintln!("Running (embedded): dtc {}", args[1..].join(" "));
+    debug_log!("Running (embedded): dtc {}", args[1..].join(" "));
 
     let c_args: Vec<CString> = args
         .iter()
-        .map(|a| CString::new(a.as_str()).unwrap())
-        .collect();
+        .map(|a| {
+            CString::new(a.as_str())
+                .map_err(|e| MkImageError::FitError(format!("invalid dtc argument '{a}': {e}")))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let c_ptrs: Vec<*const c_char> = c_args.iter().map(|a| a.as_ptr()).collect();
 
     let ret = unsafe { dtc_main(c_ptrs.len() as c_int, c_ptrs.as_ptr()) };
 
     if ret != 0 {
-        return Err(MkImageError::Other(format!(
+        return Err(MkImageError::FitError(format!(
             "dtc failed with exit code {ret}"
         )));
     }
@@ -107,7 +110,7 @@ pub fn calculate_hash(algo: &str, data: &[u8]) -> Result<Vec<u8>> {
             use sha2::Digest;
             Ok(sha2::Sha512::digest(data).to_vec())
         }
-        _ => Err(MkImageError::Other(format!(
+        _ => Err(MkImageError::FitError(format!(
             "unsupported hash algorithm: {algo}"
         ))),
     }
@@ -119,7 +122,7 @@ pub fn calculate_hash(algo: &str, data: &[u8]) -> Result<Vec<u8>> {
 
 fn parse_algo(algo: &str) -> Result<(&str, &str)> {
     algo.split_once(',').ok_or_else(|| {
-        MkImageError::Other(format!(
+        MkImageError::FitError(format!(
             "invalid algo format (expected 'hash,crypto'): {algo}"
         ))
     })
@@ -135,10 +138,13 @@ fn load_private_key_pem(
     } else if let Some(kd) = keydir {
         PathBuf::from(kd).join(format!("{keyname}.key"))
     } else {
-        return Err(MkImageError::Other("no keydir or keyfile specified".into()));
+        return Err(MkImageError::FitError(
+            "no keydir or keyfile specified".into(),
+        ));
     };
-    fs::read(&path)
-        .map_err(|e| MkImageError::Other(format!("cannot read key file '{}': {e}", path.display())))
+    fs::read(&path).map_err(|e| {
+        MkImageError::FitError(format!("cannot read key file '{}': {e}", path.display()))
+    })
 }
 
 /// Sign concatenated region bytes.
@@ -152,7 +158,7 @@ pub fn sign_regions(
     let (hash_algo, crypto_algo) = parse_algo(algo)?;
     let pem_data = load_private_key_pem(keydir, keyname, keyfile)?;
     let pem_str = std::str::from_utf8(&pem_data)
-        .map_err(|_| MkImageError::Other("key file is not valid UTF-8".into()))?;
+        .map_err(|_| MkImageError::FitError("key file is not valid UTF-8".into()))?;
 
     let mut combined = Vec::new();
     for r in regions {
@@ -164,7 +170,7 @@ pub fn sign_regions(
     } else if crypto_algo.starts_with("ecdsa") || crypto_algo == "secp521r1" {
         sign_ecdsa(hash_algo, crypto_algo, &combined, pem_str)
     } else {
-        Err(MkImageError::Other(format!(
+        Err(MkImageError::FitError(format!(
             "unsupported crypto algorithm: {crypto_algo}"
         )))
     }
@@ -178,11 +184,11 @@ fn sign_rsa(hash_algo: &str, data: &[u8], pem_str: &str) -> Result<Vec<u8>> {
     let private_key: RsaPrivateKey = if pem_str.contains("BEGIN PRIVATE KEY") {
         use pkcs8::DecodePrivateKey;
         RsaPrivateKey::from_pkcs8_pem(pem_str)
-            .map_err(|e| MkImageError::Other(format!("failed to parse PKCS#8 RSA key: {e}")))?
+            .map_err(|e| MkImageError::FitError(format!("failed to parse PKCS#8 RSA key: {e}")))?
     } else {
         use pkcs1::DecodeRsaPrivateKey;
         RsaPrivateKey::from_pkcs1_pem(pem_str)
-            .map_err(|e| MkImageError::Other(format!("failed to parse PKCS#1 RSA key: {e}")))?
+            .map_err(|e| MkImageError::FitError(format!("failed to parse PKCS#1 RSA key: {e}")))?
     };
 
     match hash_algo {
@@ -202,7 +208,7 @@ fn sign_rsa(hash_algo: &str, data: &[u8], pem_str: &str) -> Result<Vec<u8>> {
             let k = SigningKey::<sha2::Sha512>::new(private_key);
             Ok(k.sign(data).to_vec())
         }
-        _ => Err(MkImageError::Other(format!(
+        _ => Err(MkImageError::FitError(format!(
             "unsupported hash for RSA: {hash_algo}"
         ))),
     }
@@ -214,12 +220,12 @@ fn sign_ecdsa(hash_algo: &str, crypto_algo: &str, data: &[u8], pem_str: &str) ->
             use p256::ecdsa::{signature::Signer, SigningKey};
             use p256::pkcs8::DecodePrivateKey;
             if hash_algo != "sha256" {
-                return Err(MkImageError::Other(format!(
+                return Err(MkImageError::FitError(format!(
                     "ecdsa256 requires sha256, got {hash_algo}"
                 )));
             }
             let sk = SigningKey::from_pkcs8_pem(pem_str)
-                .map_err(|e| MkImageError::Other(format!("P-256 key: {e}")))?;
+                .map_err(|e| MkImageError::FitError(format!("P-256 key: {e}")))?;
             let sig: p256::ecdsa::DerSignature = sk.sign(data);
             Ok(sig.to_vec())
         }
@@ -227,16 +233,16 @@ fn sign_ecdsa(hash_algo: &str, crypto_algo: &str, data: &[u8], pem_str: &str) ->
             use p384::ecdsa::{signature::Signer, SigningKey};
             use p384::pkcs8::DecodePrivateKey;
             if hash_algo != "sha384" {
-                return Err(MkImageError::Other(format!(
+                return Err(MkImageError::FitError(format!(
                     "ecdsa384 requires sha384, got {hash_algo}"
                 )));
             }
             let sk = SigningKey::from_pkcs8_pem(pem_str)
-                .map_err(|e| MkImageError::Other(format!("P-384 key: {e}")))?;
+                .map_err(|e| MkImageError::FitError(format!("P-384 key: {e}")))?;
             let sig: p384::ecdsa::DerSignature = sk.sign(data);
             Ok(sig.to_vec())
         }
-        _ => Err(MkImageError::Other(format!(
+        _ => Err(MkImageError::FitError(format!(
             "unsupported ECDSA curve: {crypto_algo}"
         ))),
     }
@@ -278,7 +284,7 @@ pub fn fit_handle_file(params: &FitParams) -> Result<()> {
     } else if params.re_sign {
         fs::copy(&params.imagefile, &tmpfile)?;
     } else {
-        return Err(MkImageError::Other(
+        return Err(MkImageError::FitError(
             "no input file specified (use -f)".into(),
         ));
     }
@@ -289,7 +295,7 @@ pub fn fit_handle_file(params: &FitParams) -> Result<()> {
     // Step 3: move to final location
     fs::rename(&tmpfile, &params.imagefile).map_err(|e| {
         let _ = fs::remove_file(&tmpfile);
-        MkImageError::Other(format!(
+        MkImageError::FitError(format!(
             "cannot rename '{}' → '{}': {e}",
             tmpfile, params.imagefile
         ))
@@ -376,9 +382,9 @@ fn fit_add_verification_data(params: &FitParams, tmpfile: &str) -> Result<()> {
 
     // Set timestamp on the root node
     let root_off = dtb::fdt_path_offset(&dtb, "/")
-        .ok_or_else(|| MkImageError::Other("no root node".into()))?;
+        .ok_or_else(|| MkImageError::FitError("no root node".into()))?;
     let timestamp = get_source_date(None);
-    dtb::fdt_setprop_u32(&mut dtb, root_off, FIT_TIMESTAMP_PROP, timestamp);
+    dtb::fdt_setprop_u32(&mut dtb, root_off, FIT_TIMESTAMP_PROP, timestamp)?;
 
     // Process image nodes
     process_images(&mut dtb, params, signing)?;
@@ -449,9 +455,11 @@ fn process_images(dtb: &mut Vec<u8>, params: &FitParams, signing: bool) -> Resul
                 };
                 let hash = calculate_hash(&algo, &data)?;
                 // Re-resolve after reading (shouldn't change, but be safe)
-                let sub_off = dtb::fdt_path_offset(dtb, &sub_path).unwrap();
-                dtb::fdt_setprop(dtb, sub_off, FIT_VALUE_PROP, &hash);
-                eprintln!("Hash '{}' in '{}': {} computed", sub_name, image_name, algo);
+                let sub_off = dtb::fdt_path_offset(dtb, &sub_path).ok_or_else(|| {
+                    MkImageError::FitError(format!("hash node '{sub_path}' disappeared"))
+                })?;
+                dtb::fdt_setprop(dtb, sub_off, FIT_VALUE_PROP, &hash)?;
+                debug_log!("Hash '{}' in '{}': {} computed", sub_name, image_name, algo);
             } else if signing && sub_name.starts_with(FIT_SIG_NODENAME) {
                 // --- Image signature node ---
                 let sub_off = match dtb::fdt_path_offset(dtb, &sub_path) {
@@ -480,9 +488,12 @@ fn process_images(dtb: &mut Vec<u8>, params: &FitParams, signing: bool) -> Resul
 
                 write_sig_props(dtb, &sub_path, &sig, params, None)?;
 
-                eprintln!(
+                debug_log!(
                     "Signature '{}' in '{}': {} signed with key '{}'",
-                    sub_name, image_name, algo, keyname
+                    sub_name,
+                    image_name,
+                    algo,
+                    keyname
                 );
             }
         }
@@ -507,37 +518,37 @@ fn write_sig_props(
     // Helper: resolve offset, error if missing
     let resolve = |d: &[u8]| -> Result<usize> {
         dtb::fdt_path_offset(d, sig_path)
-            .ok_or_else(|| MkImageError::Other(format!("sig node '{}' disappeared", sig_path)))
+            .ok_or_else(|| MkImageError::FitError(format!("sig node '{}' disappeared", sig_path)))
     };
 
     // 1. value
-    dtb::fdt_setprop(dtb, resolve(dtb)?, FIT_VALUE_PROP, signature);
+    dtb::fdt_setprop(dtb, resolve(dtb)?, FIT_VALUE_PROP, signature)?;
 
     // 2. signer-name
-    dtb::fdt_setprop_string(dtb, resolve(dtb)?, "signer-name", SIGNER_NAME);
+    dtb::fdt_setprop_string(dtb, resolve(dtb)?, "signer-name", SIGNER_NAME)?;
 
     // 3. signer-version
     let version = params.signer_version.as_ref();
-    dtb::fdt_setprop_string(dtb, resolve(dtb)?, "signer-version", version);
+    dtb::fdt_setprop_string(dtb, resolve(dtb)?, "signer-version", version)?;
 
     // 4. comment (if specified)
     if let Some(ref comment) = params.comment {
-        dtb::fdt_setprop_string(dtb, resolve(dtb)?, "comment", comment);
+        dtb::fdt_setprop_string(dtb, resolve(dtb)?, "comment", comment)?;
     }
 
     // 5. timestamp
     let timestamp = get_source_date(None);
-    dtb::fdt_setprop_u32(dtb, resolve(dtb)?, FIT_TIMESTAMP_PROP, timestamp);
+    dtb::fdt_setprop_u32(dtb, resolve(dtb)?, FIT_TIMESTAMP_PROP, timestamp)?;
 
     // 6. hashed-nodes + hashed-strings (config signatures only)
     if let Some((hashed_nodes_val, string_size)) = region_info {
-        dtb::fdt_setprop(dtb, resolve(dtb)?, "hashed-nodes", hashed_nodes_val);
+        dtb::fdt_setprop(dtb, resolve(dtb)?, "hashed-nodes", hashed_nodes_val)?;
 
         // hashed-strings: {0 (legacy offset), string_size} in big-endian
         let mut hs = Vec::with_capacity(8);
         hs.extend_from_slice(&0u32.to_be_bytes());
         hs.extend_from_slice(&string_size.to_be_bytes());
-        dtb::fdt_setprop(dtb, resolve(dtb)?, "hashed-strings", &hs);
+        dtb::fdt_setprop(dtb, resolve(dtb)?, "hashed-strings", &hs)?;
     }
 
     Ok(())
@@ -614,7 +625,8 @@ fn process_one_config_sig(
 
     // Build node inclusion list (same as U-Boot's fit_config_get_hash_list)
     let conf_path = format!("{}/{}", FIT_CONFS_PATH, conf_name);
-    let conf_off = dtb::fdt_path_offset(dtb, &conf_path).unwrap();
+    let conf_off = dtb::fdt_path_offset(dtb, &conf_path)
+        .ok_or_else(|| MkImageError::FitError(format!("config node '{conf_path}' not found")))?;
 
     let mut node_inc: Vec<String> = Vec::new();
     node_inc.push("/".to_string());
@@ -626,7 +638,9 @@ fn process_one_config_sig(
             dtb,
             &format!("{}/{}/{}", FIT_CONFS_PATH, conf_name, sig_name),
         )
-        .unwrap();
+        .ok_or_else(|| {
+            MkImageError::FitError(format!("sig node '{conf_name}/{sig_name}' not found"))
+        })?;
         let custom = dtb::fdt_getprop_stringlist(dtb, sig_off, "sign-images");
         if custom.is_empty() {
             (
@@ -643,7 +657,7 @@ fn process_one_config_sig(
         let count = dtb::fdt_stringlist_count(dtb, conf_off, img_type);
         if count == 0 {
             if !allow_missing {
-                return Err(MkImageError::Other(format!(
+                return Err(MkImageError::FitError(format!(
                     "image '{}' not found in config '{}'",
                     img_type, conf_name
                 )));
@@ -680,9 +694,11 @@ fn process_one_config_sig(
         }
     }
 
-    eprintln!(
+    debug_log!(
         "Config '{}' sig '{}': signing nodes: {:?}",
-        conf_name, sig_name, node_inc
+        conf_name,
+        sig_name,
+        node_inc
     );
 
     // Capture string table size BEFORE we add signature properties
@@ -691,7 +707,7 @@ fn process_one_config_sig(
     // Compute FDT regions on current DTB state
     let regions = dtb::fdt_find_regions(dtb, &node_inc, EXC_PROPS, true)?;
     if regions.is_empty() {
-        return Err(MkImageError::Other(format!(
+        return Err(MkImageError::FitError(format!(
             "no regions to sign for config '{}'",
             conf_name
         )));
@@ -729,9 +745,12 @@ fn process_one_config_sig(
         Some((&hashed_nodes_val, string_size_before)),
     )?;
 
-    eprintln!(
+    debug_log!(
         "Config '{}' sig '{}': {} signed with key '{}'",
-        conf_name, sig_name, algo, keyname
+        conf_name,
+        sig_name,
+        algo,
+        keyname
     );
 
     Ok(())
@@ -747,19 +766,19 @@ mod tests {
 
     #[test]
     fn test_calculate_hash_sha256() {
-        let hash = calculate_hash("sha256", b"hello world").unwrap();
+        let hash = calculate_hash("sha256", b"hello world").expect("sha256 hash");
         assert_eq!(hash.len(), 32);
     }
 
     #[test]
     fn test_calculate_hash_crc32() {
-        let hash = calculate_hash("crc32", b"hello").unwrap();
+        let hash = calculate_hash("crc32", b"hello").expect("crc32 hash");
         assert_eq!(hash.len(), 4);
     }
 
     #[test]
     fn test_parse_algo() {
-        let (h, c) = parse_algo("sha256,rsa2048").unwrap();
+        let (h, c) = parse_algo("sha256,rsa2048").expect("parse_algo");
         assert_eq!(h, "sha256");
         assert_eq!(c, "rsa2048");
         assert!(parse_algo("sha256").is_err());
@@ -767,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_calculate_hash_sha1() {
-        let hash = calculate_hash("sha1", b"test data").unwrap();
+        let hash = calculate_hash("sha1", b"test data").expect("sha1 hash");
         assert_eq!(hash.len(), 20);
     }
 }

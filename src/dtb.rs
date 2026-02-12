@@ -31,7 +31,7 @@ pub const FDT_END: u32 = 0x00000009;
 
 /// Read a big-endian u32 from a byte slice at the given offset.
 pub fn get_u32(data: &[u8], off: usize) -> u32 {
-    u32::from_be_bytes(data[off..off + 4].try_into().unwrap())
+    u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
 }
 
 /// Write a big-endian u32 into a byte slice at the given offset.
@@ -81,7 +81,7 @@ pub fn fdt_check_header(dtb: &[u8]) -> Result<(), MkImageError> {
         });
     }
     if get_u32(dtb, HDR_MAGIC) != FDT_MAGIC {
-        return Err(MkImageError::Other("bad DTB magic".into()));
+        return Err(MkImageError::DtbError("bad DTB magic".into()));
     }
     Ok(())
 }
@@ -327,16 +327,22 @@ pub fn fdt_pack(dtb: &mut Vec<u8>) {
 /// `oldlen` bytes at `soff` with `newlen` bytes (shifting data as needed).
 /// Does NOT update any header fields.
 ///
-/// Mirrors libfdt's `fdt_splice_()`. Panics if there's not enough space.
-fn fdt_splice(dtb: &mut [u8], soff: usize, oldlen: usize, newlen: usize) {
+/// Mirrors libfdt's `fdt_splice_()`. Returns an error if there's not enough space.
+fn fdt_splice(
+    dtb: &mut [u8],
+    soff: usize,
+    oldlen: usize,
+    newlen: usize,
+) -> Result<(), MkImageError> {
     let dsize = fdt_data_size(dtb);
     let new_dsize = (dsize as isize + (newlen as isize - oldlen as isize)) as usize;
-    assert!(
-        new_dsize <= fdt_totalsize(dtb),
-        "fdt_splice: not enough space (need {}, have {})",
-        new_dsize,
-        fdt_totalsize(dtb)
-    );
+    if new_dsize > fdt_totalsize(dtb) {
+        return Err(MkImageError::DtbError(format!(
+            "fdt_splice: not enough space (need {}, have {})",
+            new_dsize,
+            fdt_totalsize(dtb)
+        )));
+    }
     // memmove(p + newlen, p + oldlen, dsize - (soff + oldlen))
     let src_start = soff + oldlen;
     let count = dsize - src_start;
@@ -347,12 +353,13 @@ fn fdt_splice(dtb: &mut [u8], soff: usize, oldlen: usize, newlen: usize) {
             dtb[i] = 0;
         }
     }
+    Ok(())
 }
 
 /// Find or add a string in the strings block. Returns the offset within the
 /// strings block. Appends at the end of the strings block (into padding),
 /// matching libfdt's fdt_splice_string_ behavior.
-fn fdt_find_or_add_string(dtb: &mut Vec<u8>, name: &str) -> usize {
+fn fdt_find_or_add_string(dtb: &mut Vec<u8>, name: &str) -> Result<usize, MkImageError> {
     let strings_off = fdt_off_dt_strings(dtb);
     let strings_size = fdt_size_dt_strings(dtb);
 
@@ -366,7 +373,7 @@ fn fdt_find_or_add_string(dtb: &mut Vec<u8>, name: &str) -> usize {
         }
         let existing = std::str::from_utf8(&dtb[s_start..s_end]).unwrap_or("");
         if existing == name {
-            return pos;
+            return Ok(pos);
         }
         pos += existing.len() + 1;
     }
@@ -382,7 +389,7 @@ fn fdt_find_or_add_string(dtb: &mut Vec<u8>, name: &str) -> usize {
 
     // Splice (effectively a no-op memmove since we're at the end of data,
     // just need to check space)
-    fdt_splice(dtb, write_pos, 0, need);
+    fdt_splice(dtb, write_pos, 0, need)?;
 
     // Write the string
     dtb[write_pos..write_pos + name_bytes.len()].copy_from_slice(name_bytes);
@@ -392,7 +399,7 @@ fn fdt_find_or_add_string(dtb: &mut Vec<u8>, name: &str) -> usize {
     let new_strings_size = strings_size + need;
     put_u32(dtb, HDR_SIZE_DT_STRINGS, new_strings_size as u32);
 
-    new_off
+    Ok(new_off)
 }
 
 /// Set a property on a node. If the property exists, its value is replaced.
@@ -402,7 +409,12 @@ fn fdt_find_or_add_string(dtb: &mut Vec<u8>, name: &str) -> usize {
 /// All modifications happen in-place within the existing `totalsize` buffer.
 /// The DTB must have been pre-expanded with enough padding (via
 /// `fdt_open_into` or `dtc -p`).
-pub fn fdt_setprop(dtb: &mut Vec<u8>, node_offset: usize, name: &str, value: &[u8]) {
+pub fn fdt_setprop(
+    dtb: &mut Vec<u8>,
+    node_offset: usize,
+    name: &str,
+    value: &[u8],
+) -> Result<(), MkImageError> {
     let padded_len = (value.len() + 3) & !3;
 
     if let Some((prop_off, val_off, old_len)) = fdt_getprop_offset(dtb, node_offset, name) {
@@ -411,7 +423,7 @@ pub fn fdt_setprop(dtb: &mut Vec<u8>, node_offset: usize, name: &str, value: &[u
 
         if padded_len != old_padded {
             // Splice the value region: replace old_padded bytes with padded_len bytes
-            fdt_splice(dtb, val_off, old_padded, padded_len);
+            fdt_splice(dtb, val_off, old_padded, padded_len)?;
 
             let delta = padded_len as isize - old_padded as isize;
             let s = fdt_size_dt_struct(dtb);
@@ -427,7 +439,7 @@ pub fn fdt_setprop(dtb: &mut Vec<u8>, node_offset: usize, name: &str, value: &[u
     } else {
         // Property doesn't exist — insert a new FDT_PROP entry.
         // First, ensure the property name is in the strings block.
-        let nameoff = fdt_find_or_add_string(dtb, name);
+        let nameoff = fdt_find_or_add_string(dtb, name)?;
 
         // Insert at the BEGINNING of the node's property list (right after
         // the BEGIN_NODE tag + name), matching libfdt's fdt_add_property_
@@ -436,7 +448,7 @@ pub fn fdt_setprop(dtb: &mut Vec<u8>, node_offset: usize, name: &str, value: &[u
 
         // Splice in the struct block to make room
         let entry_size = 12 + padded_len;
-        fdt_splice(dtb, insert_pos, 0, entry_size);
+        fdt_splice(dtb, insert_pos, 0, entry_size)?;
 
         // Write the property entry. Do NOT zero padding bytes — match
         // libfdt behavior where padding contains residual data from memmove.
@@ -451,18 +463,29 @@ pub fn fdt_setprop(dtb: &mut Vec<u8>, node_offset: usize, name: &str, value: &[u
         let o = fdt_off_dt_strings(dtb);
         put_u32(dtb, HDR_OFF_DT_STRINGS, (o + entry_size) as u32);
     }
+    Ok(())
 }
 
 /// Convenience: set a string property (auto-adds NUL terminator).
-pub fn fdt_setprop_string(dtb: &mut Vec<u8>, node_offset: usize, name: &str, val: &str) {
+pub fn fdt_setprop_string(
+    dtb: &mut Vec<u8>,
+    node_offset: usize,
+    name: &str,
+    val: &str,
+) -> Result<(), MkImageError> {
     let mut v = val.as_bytes().to_vec();
     v.push(0);
-    fdt_setprop(dtb, node_offset, name, &v);
+    fdt_setprop(dtb, node_offset, name, &v)
 }
 
 /// Convenience: set a u32 property (big-endian).
-pub fn fdt_setprop_u32(dtb: &mut Vec<u8>, node_offset: usize, name: &str, val: u32) {
-    fdt_setprop(dtb, node_offset, name, &val.to_be_bytes());
+pub fn fdt_setprop_u32(
+    dtb: &mut Vec<u8>,
+    node_offset: usize,
+    name: &str,
+    val: u32,
+) -> Result<(), MkImageError> {
+    fdt_setprop(dtb, node_offset, name, &val.to_be_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -515,7 +538,7 @@ pub fn fdt_find_regions(
                 let name = fdt_get_name(dtb, offset);
                 depth += 1;
                 if depth as usize >= MAX_DEPTH {
-                    return Err(MkImageError::Other("DTB too deep".into()));
+                    return Err(MkImageError::DtbError("DTB too deep".into()));
                 }
                 if depth == 0 {
                     path.clear();
@@ -540,7 +563,7 @@ pub fn fdt_find_regions(
             FDT_END_NODE => {
                 stop_at = nextoffset;
                 if depth < 0 {
-                    return Err(MkImageError::Other("DTB END_NODE underflow".into()));
+                    return Err(MkImageError::DtbError("DTB END_NODE underflow".into()));
                 }
                 include = want > 0;
                 want = stack[depth as usize];
@@ -566,10 +589,12 @@ pub fn fdt_find_regions(
             FDT_END => {
                 // FDT_END is always included
                 if start == -1 {
-                    if !regions.is_empty() {
-                        let last = regions.last().unwrap();
+                    if let Some(last) = regions.last() {
                         if (offset - base) == last.offset + last.size - base {
-                            start = regions.pop().unwrap().offset as i64 - base as i64;
+                            // Safe: we just confirmed non-empty via last()
+                            if let Some(popped) = regions.pop() {
+                                start = popped.offset as i64 - base as i64;
+                            }
                         } else {
                             start = (offset - base) as i64;
                         }
@@ -580,7 +605,7 @@ pub fn fdt_find_regions(
                 break;
             }
             _ => {
-                return Err(MkImageError::Other(format!(
+                return Err(MkImageError::DtbError(format!(
                     "unknown DTB tag 0x{:08x} at 0x{:x}",
                     tag, offset
                 )));
@@ -589,10 +614,12 @@ pub fn fdt_find_regions(
 
         // Region tracking
         if include && start == -1 {
-            if !regions.is_empty() {
-                let last = regions.last().unwrap();
+            if let Some(last) = regions.last() {
                 if (offset - base) == last.offset + last.size - base {
-                    start = regions.pop().unwrap().offset as i64 - base as i64;
+                    // Safe: we just confirmed non-empty via last()
+                    if let Some(popped) = regions.pop() {
+                        start = popped.offset as i64 - base as i64;
+                    }
                 } else {
                     start = (offset - base) as i64;
                 }
@@ -672,7 +699,7 @@ impl DtNode {
     pub fn get_property_u32(&self, name: &str) -> Option<u32> {
         self.get_property(name).and_then(|v| {
             if v.len() >= 4 {
-                Some(u32::from_be_bytes(v[..4].try_into().unwrap()))
+                Some(u32::from_be_bytes([v[0], v[1], v[2], v[3]]))
             } else {
                 None
             }
@@ -807,7 +834,7 @@ impl<'a> Parser<'a> {
                 FDT_END_NODE => return Ok(node),
                 FDT_NOP => {}
                 _ => {
-                    return Err(MkImageError::Other(format!(
+                    return Err(MkImageError::DtbError(format!(
                         "unexpected DTB tag 0x{:08x} at offset {}",
                         tag,
                         self.pos - 4
@@ -830,7 +857,7 @@ pub fn parse_dtb(data: &[u8]) -> Result<DtNode, MkImageError> {
     };
     let tag = parser.read_u32();
     if tag != FDT_BEGIN_NODE {
-        return Err(MkImageError::Other(
+        return Err(MkImageError::DtbError(
             "expected FDT_BEGIN_NODE for root".into(),
         ));
     }
@@ -952,10 +979,10 @@ mod tests {
     fn roundtrip_serialize_parse() {
         let tree = make_simple_tree();
         let dtb = serialize_dtb(&tree, 0);
-        let parsed = parse_dtb(&dtb).unwrap();
+        let parsed = parse_dtb(&dtb).expect("parse_dtb");
         assert_eq!(parsed.get_property_str("compatible"), Some("test"));
         assert_eq!(parsed.get_property_u32("#address-cells"), Some(1));
-        let child = parsed.child("child").unwrap();
+        let child = parsed.child("child").expect("child node");
         assert_eq!(child.get_property_str("status"), Some("okay"));
     }
 
@@ -972,9 +999,9 @@ mod tests {
     fn raw_fdt_getprop() {
         let tree = make_simple_tree();
         let dtb = serialize_dtb(&tree, 0);
-        let root_off = fdt_path_offset(&dtb, "/").unwrap();
+        let root_off = fdt_path_offset(&dtb, "/").expect("root offset");
         assert_eq!(fdt_getprop_str(&dtb, root_off, "compatible"), Some("test"));
-        let child_off = fdt_path_offset(&dtb, "/child").unwrap();
+        let child_off = fdt_path_offset(&dtb, "/child").expect("child offset");
         assert_eq!(
             fdt_getprop(&dtb, child_off, "data"),
             Some([1u8, 2, 3, 4].as_slice())
@@ -985,9 +1012,9 @@ mod tests {
     fn raw_fdt_setprop_overwrite() {
         let tree = make_simple_tree();
         let mut dtb = serialize_dtb(&tree, 256);
-        let child_off = fdt_path_offset(&dtb, "/child").unwrap();
-        fdt_setprop(&mut dtb, child_off, "data", &[5, 6, 7, 8]);
-        let child_off = fdt_path_offset(&dtb, "/child").unwrap();
+        let child_off = fdt_path_offset(&dtb, "/child").expect("child offset");
+        fdt_setprop(&mut dtb, child_off, "data", &[5, 6, 7, 8]).expect("setprop overwrite");
+        let child_off = fdt_path_offset(&dtb, "/child").expect("child offset after setprop");
         assert_eq!(
             fdt_getprop(&dtb, child_off, "data"),
             Some([5u8, 6, 7, 8].as_slice())
@@ -998,9 +1025,9 @@ mod tests {
     fn raw_fdt_setprop_grow() {
         let tree = make_simple_tree();
         let mut dtb = serialize_dtb(&tree, 256);
-        let child_off = fdt_path_offset(&dtb, "/child").unwrap();
-        fdt_setprop(&mut dtb, child_off, "data", &[1, 2, 3, 4, 5, 6, 7, 8]);
-        let child_off = fdt_path_offset(&dtb, "/child").unwrap();
+        let child_off = fdt_path_offset(&dtb, "/child").expect("child offset");
+        fdt_setprop(&mut dtb, child_off, "data", &[1, 2, 3, 4, 5, 6, 7, 8]).expect("setprop grow");
+        let child_off = fdt_path_offset(&dtb, "/child").expect("child offset after grow");
         assert_eq!(
             fdt_getprop(&dtb, child_off, "data"),
             Some([1u8, 2, 3, 4, 5, 6, 7, 8].as_slice())
@@ -1011,9 +1038,9 @@ mod tests {
     fn raw_fdt_setprop_new() {
         let tree = make_simple_tree();
         let mut dtb = serialize_dtb(&tree, 256);
-        let child_off = fdt_path_offset(&dtb, "/child").unwrap();
-        fdt_setprop_string(&mut dtb, child_off, "new-prop", "hello");
-        let child_off = fdt_path_offset(&dtb, "/child").unwrap();
+        let child_off = fdt_path_offset(&dtb, "/child").expect("child offset");
+        fdt_setprop_string(&mut dtb, child_off, "new-prop", "hello").expect("setprop_string new");
+        let child_off = fdt_path_offset(&dtb, "/child").expect("child offset after new prop");
         assert_eq!(fdt_getprop_str(&dtb, child_off, "new-prop"), Some("hello"));
         // Old properties still accessible
         assert_eq!(fdt_getprop_str(&dtb, child_off, "status"), Some("okay"));
@@ -1023,8 +1050,8 @@ mod tests {
     fn raw_subnodes() {
         let tree = make_simple_tree();
         let dtb = serialize_dtb(&tree, 0);
-        let root_off = fdt_path_offset(&dtb, "/").unwrap();
-        let first = fdt_first_subnode(&dtb, root_off).unwrap();
+        let root_off = fdt_path_offset(&dtb, "/").expect("root offset");
+        let first = fdt_first_subnode(&dtb, root_off).expect("first subnode");
         assert_eq!(fdt_get_name(&dtb, first), "child");
         assert!(fdt_next_subnode(&dtb, first).is_none());
     }
@@ -1039,7 +1066,7 @@ mod tests {
             &["data"],
             true,
         )
-        .unwrap();
+        .expect("fdt_find_regions");
         assert!(!regions.is_empty());
     }
 }

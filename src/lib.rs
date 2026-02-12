@@ -27,9 +27,6 @@
 //! mkimage::create_image(&params, "zImage", "uImage").unwrap();
 //! ```
 
-pub mod dtb;
-pub mod fit;
-
 use std::fmt;
 use std::fs;
 use std::io;
@@ -38,6 +35,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crc32fast::Hasher;
 use thiserror::Error;
+
+// ---------------------------------------------------------------------------
+// Debug logging (gated on DEBUG-MKIMAGE env var)
+// ---------------------------------------------------------------------------
+
+/// Check if debug logging is enabled (via `DEBUG-MKIMAGE` env var).
+pub(crate) fn debug_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("DEBUG-MKIMAGE").is_ok())
+}
+
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        if crate::debug_enabled() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
+pub mod dtb;
+pub mod fit;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -87,6 +106,12 @@ pub enum MkImageError {
         file_size: usize,
         header_size: usize,
     },
+
+    #[error("FIT: {0}")]
+    FitError(String),
+
+    #[error("DTB: {0}")]
+    DtbError(String),
 
     #[error("{0}")]
     Other(String),
@@ -422,13 +447,13 @@ impl LegacyImageHeader {
         let mut name = [0u8; IH_NMLEN];
         name.copy_from_slice(&data[32..64]);
         Ok(Self {
-            ih_magic: u32::from_be_bytes(data[0..4].try_into().unwrap()),
-            ih_hcrc: u32::from_be_bytes(data[4..8].try_into().unwrap()),
-            ih_time: u32::from_be_bytes(data[8..12].try_into().unwrap()),
-            ih_size: u32::from_be_bytes(data[12..16].try_into().unwrap()),
-            ih_load: u32::from_be_bytes(data[16..20].try_into().unwrap()),
-            ih_ep: u32::from_be_bytes(data[20..24].try_into().unwrap()),
-            ih_dcrc: u32::from_be_bytes(data[24..28].try_into().unwrap()),
+            ih_magic: u32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+            ih_hcrc: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+            ih_time: u32::from_be_bytes([data[8], data[9], data[10], data[11]]),
+            ih_size: u32::from_be_bytes([data[12], data[13], data[14], data[15]]),
+            ih_load: u32::from_be_bytes([data[16], data[17], data[18], data[19]]),
+            ih_ep: u32::from_be_bytes([data[20], data[21], data[22], data[23]]),
+            ih_dcrc: u32::from_be_bytes([data[24], data[25], data[26], data[27]]),
             ih_os: data[28],
             ih_arch: data[29],
             ih_type: data[30],
@@ -597,7 +622,7 @@ pub fn get_source_date(fallback: Option<u32>) -> u32 {
         if let Ok(epoch) = val.parse::<u32>() {
             return epoch;
         }
-        eprintln!("warning: invalid SOURCE_DATE_EPOCH value: {val}");
+        debug_log!("warning: invalid SOURCE_DATE_EPOCH value: {val}");
         return 0;
     }
     fallback.unwrap_or_else(|| {
@@ -696,7 +721,12 @@ fn parse_multi_sizes(data: &[u8]) -> Vec<(u64, u32)> {
         if offset + 4 > data.len() {
             break;
         }
-        let sz = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap());
+        let sz = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]);
         offset += 4;
         if sz == 0 {
             break;
@@ -853,7 +883,7 @@ fn fit_type_shows_entry(t: ImageType) -> bool {
 fn fdt_prop_u32(data: &[u8], node: usize, name: &str) -> Option<u32> {
     let prop = dtb::fdt_getprop(data, node, name)?;
     if prop.len() >= 4 {
-        Some(u32::from_be_bytes(prop[..4].try_into().unwrap()))
+        Some(u32::from_be_bytes([prop[0], prop[1], prop[2], prop[3]]))
     } else {
         None
     }
@@ -890,7 +920,7 @@ pub fn print_fit_image_info_bytes(data: &[u8]) -> Result<()> {
     dtb::fdt_check_header(data)?;
 
     let root = dtb::fdt_path_offset(data, "/")
-        .ok_or_else(|| MkImageError::Other("no root node in FIT".into()))?;
+        .ok_or_else(|| MkImageError::FitError("no root node in FIT".into()))?;
 
     // FIT description
     if let Some(desc) = dtb::fdt_getprop_str(data, root, "description") {
@@ -1049,7 +1079,7 @@ pub fn list_image_bytes(data: &[u8]) -> Result<()> {
             min: 4,
         });
     }
-    let magic = u32::from_be_bytes(data[..4].try_into().unwrap());
+    let magic = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
     if magic == IH_MAGIC {
         let info = read_image_bytes(data)?;
         print_image_info(&info);
@@ -1389,7 +1419,7 @@ mod tests {
         let bytes = hdr.to_bytes();
         assert_eq!(bytes.len(), LEGACY_HEADER_SIZE);
 
-        let hdr2 = LegacyImageHeader::from_bytes(&bytes).unwrap();
+        let hdr2 = LegacyImageHeader::from_bytes(&bytes).expect("from_bytes");
         assert_eq!(hdr2.ih_magic, IH_MAGIC);
         assert_eq!(hdr2.ih_size, 0x1234);
         assert_eq!(hdr2.ih_load, 0x80008000);
@@ -1409,9 +1439,9 @@ mod tests {
             .build();
 
         let data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04];
-        let image = create_image_bytes(&params, &data).unwrap();
+        let image = create_image_bytes(&params, &data).expect("create_image_bytes");
 
-        let info = read_image_bytes(&image).unwrap();
+        let info = read_image_bytes(&image).expect("read_image_bytes");
         assert_eq!(info.header.ih_magic, IH_MAGIC);
         assert_eq!(info.header.ih_size, 8);
         assert_eq!(info.header.ih_load, 0x80008000);
@@ -1434,8 +1464,8 @@ mod tests {
             .build();
 
         let files = vec![vec![1u8, 2, 3, 4, 5], vec![10u8, 20, 30]];
-        let image = create_multi_image_bytes(&params, &files).unwrap();
-        let info = read_image_bytes(&image).unwrap();
+        let image = create_multi_image_bytes(&params, &files).expect("create_multi_image_bytes");
+        let info = read_image_bytes(&image).expect("read_image_bytes");
 
         assert_eq!(info.sub_images.len(), 2);
         assert_eq!(info.sub_images[0].1, 5);
@@ -1471,8 +1501,8 @@ mod tests {
             .build();
 
         let data = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x12, 0x34];
-        let image = create_image_bytes(&params, &data).unwrap();
-        let extracted = extract_subimage_bytes(&image, 0).unwrap();
+        let image = create_image_bytes(&params, &data).expect("create_image_bytes");
+        let extracted = extract_subimage_bytes(&image, 0).expect("extract position 0");
         assert_eq!(extracted, &data[..]);
 
         // Position 1 should fail on single-file image
@@ -1493,12 +1523,12 @@ mod tests {
         let file0 = vec![1u8, 2, 3, 4, 5];
         let file1 = vec![10u8, 20, 30];
         let files = vec![file0.clone(), file1.clone()];
-        let image = create_multi_image_bytes(&params, &files).unwrap();
+        let image = create_multi_image_bytes(&params, &files).expect("create_multi_image_bytes");
 
-        let ext0 = extract_subimage_bytes(&image, 0).unwrap();
+        let ext0 = extract_subimage_bytes(&image, 0).expect("extract position 0");
         assert_eq!(ext0, &file0[..]);
 
-        let ext1 = extract_subimage_bytes(&image, 1).unwrap();
+        let ext1 = extract_subimage_bytes(&image, 1).expect("extract position 1");
         assert_eq!(ext1, &file1[..]);
 
         // Out of range

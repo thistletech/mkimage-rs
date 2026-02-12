@@ -61,7 +61,10 @@ fn main() {
             }
         }
     } else {
-        let outfile = cli.outfile.unwrap();
+        let Some(outfile) = cli.outfile else {
+            eprintln!("dumpimage: no output file specified");
+            process::exit(1);
+        };
         match extract_subimage(&cli.imagefile, cli.position, &outfile) {
             Ok(()) => {}
             Err(e) => {
