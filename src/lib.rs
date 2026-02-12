@@ -83,7 +83,10 @@ pub enum MkImageError {
     BadXipBuffer { size: usize },
 
     #[error("data file too small for XIP ({file_size} < {header_size})")]
-    XipTooSmall { file_size: usize, header_size: usize },
+    XipTooSmall {
+        file_size: usize,
+        header_size: usize,
+    },
 
     #[error("{0}")]
     Other(String),
@@ -436,7 +439,11 @@ impl LegacyImageHeader {
 
     /// Return the image name as a UTF-8 string (trimmed of NUL padding).
     pub fn name_str(&self) -> &str {
-        let end = self.ih_name.iter().position(|&b| b == 0).unwrap_or(IH_NMLEN);
+        let end = self
+            .ih_name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(IH_NMLEN);
         std::str::from_utf8(&self.ih_name[..end]).unwrap_or("<invalid utf8>")
     }
 
@@ -664,13 +671,12 @@ pub fn read_image_bytes(data: &[u8]) -> Result<ImageInfo> {
     }
 
     // Multi-file / script sub-images
-    let sub_images = if hdr.ih_type == ImageType::Multi as u8
-        || hdr.ih_type == ImageType::Script as u8
-    {
-        parse_multi_sizes(data)
-    } else {
-        Vec::new()
-    };
+    let sub_images =
+        if hdr.ih_type == ImageType::Multi as u8 || hdr.ih_type == ImageType::Script as u8 {
+            parse_multi_sizes(data)
+        } else {
+            Vec::new()
+        };
 
     Ok(ImageInfo {
         header: hdr,
@@ -725,17 +731,17 @@ pub fn print_image_info(info: &ImageInfo) {
     if ts != 0 {
         let dt = chrono::DateTime::from_timestamp(ts as i64, 0);
         if let Some(dt) = dt {
-            println!(
-                "Created:      {}",
-                dt.format("%a %b %d %H:%M:%S %Y")
-            );
+            println!("Created:      {}", dt.format("%a %b %d %H:%M:%S %Y"));
         } else {
             println!("Created:      (invalid timestamp)");
         }
     }
 
     // Image Type line: "<arch> <os> <type> (<comp>)"
-    let arch_name = hdr.arch().map(|a| a.long_name()).unwrap_or("Unknown Architecture");
+    let arch_name = hdr
+        .arch()
+        .map(|a| a.long_name())
+        .unwrap_or("Unknown Architecture");
     let os_name = hdr.os().map(|o| o.long_name()).unwrap_or("Unknown OS");
     let type_name = hdr
         .image_type()
@@ -745,9 +751,7 @@ pub fn print_image_info(info: &ImageInfo) {
         .compression()
         .map(|c| c.long_name())
         .unwrap_or("unknown");
-    println!(
-        "Image Type:   {arch_name} {os_name} {type_name} ({comp_name})"
-    );
+    println!("Image Type:   {arch_name} {os_name} {type_name} ({comp_name})");
 
     // Data size
     let size = hdr.ih_size;
@@ -818,10 +822,7 @@ fn fit_type_shows_arch(t: ImageType) -> bool {
 fn fit_type_shows_os(t: ImageType) -> bool {
     matches!(
         t,
-        ImageType::Kernel
-            | ImageType::KernelNoload
-            | ImageType::Standalone
-            | ImageType::Ramdisk
+        ImageType::Kernel | ImageType::KernelNoload | ImageType::Standalone | ImageType::Ramdisk
     )
 }
 
@@ -844,10 +845,7 @@ fn fit_type_shows_load(t: ImageType) -> bool {
 fn fit_type_shows_entry(t: ImageType) -> bool {
     matches!(
         t,
-        ImageType::Kernel
-            | ImageType::KernelNoload
-            | ImageType::Standalone
-            | ImageType::Ramdisk
+        ImageType::Kernel | ImageType::KernelNoload | ImageType::Standalone | ImageType::Ramdisk
     )
 }
 
@@ -924,8 +922,7 @@ pub fn print_fit_image_info_bytes(data: &[u8]) -> Result<()> {
             }
 
             // Resolve image type for conditional field display
-            let img_type = dtb::fdt_getprop_str(data, off, "type")
-                .and_then(ImageType::from_name);
+            let img_type = dtb::fdt_getprop_str(data, off, "type").and_then(ImageType::from_name);
 
             if let Some(type_str) = dtb::fdt_getprop_str(data, off, "type") {
                 let long = ImageType::from_name(type_str)
@@ -1008,12 +1005,10 @@ pub fn print_fit_image_info_bytes(data: &[u8]) -> Result<()> {
                 println!("  {:<14}{}", "Description:", desc);
             }
 
-            let kernel = dtb::fdt_getprop_str(data, off, "kernel")
-                .unwrap_or("unavailable");
+            let kernel = dtb::fdt_getprop_str(data, off, "kernel").unwrap_or("unavailable");
             println!("  {:<14}{}", "Kernel:", kernel);
 
-            let fdt = dtb::fdt_getprop_str(data, off, "fdt")
-                .unwrap_or("unavailable");
+            let fdt = dtb::fdt_getprop_str(data, off, "fdt").unwrap_or("unavailable");
             println!("  {:<14}{}", "FDT:", fdt);
 
             // Hash sub-nodes (value typically unavailable for configs)
@@ -1049,7 +1044,10 @@ pub fn list_image(path: impl AsRef<Path>) -> Result<()> {
 /// Same as [`list_image`] but works on an in-memory buffer.
 pub fn list_image_bytes(data: &[u8]) -> Result<()> {
     if data.len() < 4 {
-        return Err(MkImageError::TooSmall { size: data.len(), min: 4 });
+        return Err(MkImageError::TooSmall {
+            size: data.len(),
+            min: 4,
+        });
     }
     let magic = u32::from_be_bytes(data[..4].try_into().unwrap());
     if magic == IH_MAGIC {
@@ -1080,9 +1078,7 @@ pub fn create_image(
 
     let data = fs::read(data_path)?;
     if data.is_empty() {
-        return Err(MkImageError::EmptyInput(
-            data_path.display().to_string(),
-        ));
+        return Err(MkImageError::EmptyInput(data_path.display().to_string()));
     }
 
     let image = create_image_bytes(params, &data)?;
@@ -1196,10 +1192,7 @@ pub fn create_multi_image(
 }
 
 /// Create a multi-file legacy U-Boot image from in-memory data slices.
-pub fn create_multi_image_bytes(
-    params: &ImageParams,
-    data_files: &[Vec<u8>],
-) -> Result<Vec<u8>> {
+pub fn create_multi_image_bytes(params: &ImageParams, data_files: &[Vec<u8>]) -> Result<Vec<u8>> {
     let effective_ep = if params.ep_set {
         params.entry_point
     } else {
@@ -1263,10 +1256,7 @@ pub fn create_multi_image_bytes(
 }
 
 /// Create a legacy image with no data (empty body, ih_size = 0).
-pub fn create_empty_image(
-    params: &ImageParams,
-    output_file: impl AsRef<Path>,
-) -> Result<()> {
+pub fn create_empty_image(params: &ImageParams, output_file: impl AsRef<Path>) -> Result<()> {
     let effective_ep = if params.ep_set {
         params.entry_point
     } else {
@@ -1443,10 +1433,7 @@ mod tests {
             .name("multi test")
             .build();
 
-        let files = vec![
-            vec![1u8, 2, 3, 4, 5],
-            vec![10u8, 20, 30],
-        ];
+        let files = vec![vec![1u8, 2, 3, 4, 5], vec![10u8, 20, 30]];
         let image = create_multi_image_bytes(&params, &files).unwrap();
         let info = read_image_bytes(&image).unwrap();
 

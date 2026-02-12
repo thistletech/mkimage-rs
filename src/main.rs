@@ -109,15 +109,10 @@ struct Cli {
 
 fn parse_hex_u32(s: &str) -> Result<u32> {
     let s = s.trim_start_matches("0x").trim_start_matches("0X");
-    u32::from_str_radix(s, 16).map_err(|_| {
-        MkImageError::Other(format!("invalid hex value: {}", s))
-    })
+    u32::from_str_radix(s, 16).map_err(|_| MkImageError::Other(format!("invalid hex value: {}", s)))
 }
 
-fn show_valid<F: Fn() -> &'static [(u8, &'static str, &'static str)]>(
-    category: &str,
-    table_fn: F,
-) {
+fn show_valid<F: Fn() -> &'static [(u8, &'static str, &'static str)]>(category: &str, table_fn: F) {
     eprintln!("\nInvalid {category}, supported are:");
     let mut entries: Vec<_> = table_fn().to_vec();
     entries.sort_by(|a, b| a.1.cmp(&b.1));
@@ -179,7 +174,6 @@ fn main() {
             re_sign: cli.fit_resign && cli.fit_source.is_none(),
             signer_version: cli.signer_version.clone(),
         };
-
 
         match fit::fit_handle_file(&fit_params) {
             Ok(()) => {

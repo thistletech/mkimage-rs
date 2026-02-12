@@ -56,11 +56,7 @@ fn main() {
         match list_image(&cli.imagefile) {
             Ok(()) => {}
             Err(e) => {
-                eprintln!(
-                    "dumpimage: {}: {}",
-                    cli.imagefile.display(),
-                    e
-                );
+                eprintln!("dumpimage: {}: {}", cli.imagefile.display(), e);
                 process::exit(1);
             }
         }

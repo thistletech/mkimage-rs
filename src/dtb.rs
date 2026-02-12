@@ -75,7 +75,10 @@ pub fn fdt_size_dt_strings(dtb: &[u8]) -> usize {
 
 pub fn fdt_check_header(dtb: &[u8]) -> Result<(), MkImageError> {
     if dtb.len() < HDR_SIZE {
-        return Err(MkImageError::TooSmall { size: dtb.len(), min: HDR_SIZE });
+        return Err(MkImageError::TooSmall {
+            size: dtb.len(),
+            min: HDR_SIZE,
+        });
     }
     if get_u32(dtb, HDR_MAGIC) != FDT_MAGIC {
         return Err(MkImageError::Other("bad DTB magic".into()));
@@ -232,19 +235,13 @@ pub fn fdt_next_subnode(dtb: &[u8], node_offset: usize) -> Option<usize> {
 /// `node_offset` must point to a FDT_BEGIN_NODE tag.
 /// The property must be a direct property of this node (not a child's property).
 pub fn fdt_getprop<'a>(dtb: &'a [u8], node_offset: usize, name: &str) -> Option<&'a [u8]> {
-    fdt_getprop_offset(dtb, node_offset, name).map(|(_, val_off, len)| {
-        &dtb[val_off..val_off + len]
-    })
+    fdt_getprop_offset(dtb, node_offset, name).map(|(_, val_off, len)| &dtb[val_off..val_off + len])
 }
 
 /// Like `fdt_getprop` but also returns the offset of the FDT_PROP tag and
 /// the offset of the value data and its length.
 /// Returns (prop_tag_offset, value_data_offset, value_len).
-fn fdt_getprop_offset(
-    dtb: &[u8],
-    node_offset: usize,
-    name: &str,
-) -> Option<(usize, usize, usize)> {
+fn fdt_getprop_offset(dtb: &[u8], node_offset: usize, name: &str) -> Option<(usize, usize, usize)> {
     let (_, mut pos) = fdt_next_tag(dtb, node_offset);
     loop {
         let tag = get_u32(dtb, pos);
@@ -833,7 +830,9 @@ pub fn parse_dtb(data: &[u8]) -> Result<DtNode, MkImageError> {
     };
     let tag = parser.read_u32();
     if tag != FDT_BEGIN_NODE {
-        return Err(MkImageError::Other("expected FDT_BEGIN_NODE for root".into()));
+        return Err(MkImageError::Other(
+            "expected FDT_BEGIN_NODE for root".into(),
+        ));
     }
     parser.parse_node()
 }
@@ -976,7 +975,10 @@ mod tests {
         let root_off = fdt_path_offset(&dtb, "/").unwrap();
         assert_eq!(fdt_getprop_str(&dtb, root_off, "compatible"), Some("test"));
         let child_off = fdt_path_offset(&dtb, "/child").unwrap();
-        assert_eq!(fdt_getprop(&dtb, child_off, "data"), Some([1u8, 2, 3, 4].as_slice()));
+        assert_eq!(
+            fdt_getprop(&dtb, child_off, "data"),
+            Some([1u8, 2, 3, 4].as_slice())
+        );
     }
 
     #[test]
@@ -986,7 +988,10 @@ mod tests {
         let child_off = fdt_path_offset(&dtb, "/child").unwrap();
         fdt_setprop(&mut dtb, child_off, "data", &[5, 6, 7, 8]);
         let child_off = fdt_path_offset(&dtb, "/child").unwrap();
-        assert_eq!(fdt_getprop(&dtb, child_off, "data"), Some([5u8, 6, 7, 8].as_slice()));
+        assert_eq!(
+            fdt_getprop(&dtb, child_off, "data"),
+            Some([5u8, 6, 7, 8].as_slice())
+        );
     }
 
     #[test]

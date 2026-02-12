@@ -18,11 +18,7 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let version_path = PathBuf::from_str(&out_dir).unwrap().join("version_gen.h");
     let mut version_file = File::create(&version_path).unwrap();
-    writeln!(
-        version_file,
-        "#define DTC_VERSION \"1.7.6 (mkimage-rs)\""
-    )
-    .unwrap();
+    writeln!(version_file, "#define DTC_VERSION \"1.7.6 (mkimage-rs)\"").unwrap();
     drop(version_file);
 
     let mut build = cc::Build::new();

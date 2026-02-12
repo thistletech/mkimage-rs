@@ -65,10 +65,7 @@ fn run_dtc(dtc_opts: &str, output: &str, input: &str) -> Result<()> {
     args.push(output.into());
     args.push(input.into());
 
-    eprintln!(
-        "Running (embedded): dtc {}",
-        args[1..].join(" ")
-    );
+    eprintln!("Running (embedded): dtc {}", args[1..].join(" "));
 
     let c_args: Vec<CString> = args
         .iter()
@@ -140,9 +137,8 @@ fn load_private_key_pem(
     } else {
         return Err(MkImageError::Other("no keydir or keyfile specified".into()));
     };
-    fs::read(&path).map_err(|e| {
-        MkImageError::Other(format!("cannot read key file '{}': {e}", path.display()))
-    })
+    fs::read(&path)
+        .map_err(|e| MkImageError::Other(format!("cannot read key file '{}': {e}", path.display())))
 }
 
 /// Sign concatenated region bytes.
@@ -282,7 +278,9 @@ pub fn fit_handle_file(params: &FitParams) -> Result<()> {
     } else if params.re_sign {
         fs::copy(&params.imagefile, &tmpfile)?;
     } else {
-        return Err(MkImageError::Other("no input file specified (use -f)".into()));
+        return Err(MkImageError::Other(
+            "no input file specified (use -f)".into(),
+        ));
     }
 
     // Step 2: add hashes and signatures in-place
@@ -519,9 +517,7 @@ fn write_sig_props(
     dtb::fdt_setprop_string(dtb, resolve(dtb)?, "signer-name", SIGNER_NAME);
 
     // 3. signer-version
-    let version = params
-        .signer_version
-        .as_ref();
+    let version = params.signer_version.as_ref();
     dtb::fdt_setprop_string(dtb, resolve(dtb)?, "signer-version", version);
 
     // 4. comment (if specified)
@@ -626,7 +622,11 @@ fn process_one_config_sig(
 
     // Determine which images to sign
     let (sign_images, allow_missing): (Vec<String>, bool) = {
-        let sig_off = dtb::fdt_path_offset(dtb, &format!("{}/{}/{}", FIT_CONFS_PATH, conf_name, sig_name)).unwrap();
+        let sig_off = dtb::fdt_path_offset(
+            dtb,
+            &format!("{}/{}/{}", FIT_CONFS_PATH, conf_name, sig_name),
+        )
+        .unwrap();
         let custom = dtb::fdt_getprop_stringlist(dtb, sig_off, "sign-images");
         if custom.is_empty() {
             (
