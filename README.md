@@ -87,6 +87,38 @@ let params = ImageParams::builder()
 mkimage::create_image(&params, "zImage", "uImage").unwrap();
 ```
 
+## Custom signing backend
+
+mkimage-rs supports pluggable signing via the `FitSigner` trait. This lets you
+route signing through a remote service, HSM, or any custom backend — the library
+handles hashing, DTB manipulation, and region assembly while your implementation
+only needs to produce raw signatures.
+
+```rust
+use mkimage::fit::{FitSigner, FitParams, fit_handle_file_with_signer};
+
+struct MySigner { /* your KMS client, HSM handle, etc. */ }
+
+impl FitSigner for MySigner {
+    fn sign(&self, algo: &str, data: &[u8], keyname: &str) -> mkimage::Result<Vec<u8>> {
+        // algo: "sha256,rsa2048" — hash algorithm + crypto algorithm
+        // data: concatenated bytes of all regions to sign
+        // keyname: key-name-hint from the signature node
+        //
+        // Return the raw signature bytes (e.g. 256 bytes for RSA-2048).
+        todo!()
+    }
+}
+
+let signer = MySigner { /* ... */ };
+fit_handle_file_with_signer(&params, &signer)?;
+```
+
+The default `DefaultFitSigner` loads PEM keys from disk — see
+`fit_handle_file()` which uses it internally.
+
+See `examples/custom_signer.rs` for a complete runnable example.
+
 ## License
 
 MIT.

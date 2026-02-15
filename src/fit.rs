@@ -41,6 +41,48 @@ pub const FIT_KEY_HINT: &str = "key-name-hint";
 pub const FIT_DATA_PROP: &str = "data";
 pub const FIT_TIMESTAMP_PROP: &str = "timestamp";
 
+// ---------------------------------------------------------------------------
+// FitSigner trait — pluggable signing for FIT images
+// ---------------------------------------------------------------------------
+
+/// Trait for signing FIT image regions.
+///
+/// The default implementation loads private keys from disk and signs locally.
+/// Override to route signing through a remote service or HSM.
+pub trait FitSigner {
+    /// Sign concatenated region data.
+    ///
+    /// `algo` — algorithm string like `"sha256,rsa2048"` or `"sha256,ecdsa256"`
+    /// `data` — concatenated bytes of all regions to sign
+    /// `keyname` — key hint from the signature node's `key-name-hint` property
+    fn sign(&self, algo: &str, data: &[u8], keyname: &str) -> Result<Vec<u8>>;
+}
+
+/// Default signer that loads keys from keydir/keyfile on disk.
+pub struct DefaultFitSigner<'a> {
+    pub keydir: Option<&'a str>,
+    pub keyfile: Option<&'a str>,
+}
+
+impl FitSigner for DefaultFitSigner<'_> {
+    fn sign(&self, algo: &str, data: &[u8], keyname: &str) -> Result<Vec<u8>> {
+        let (hash_algo, crypto_algo) = parse_algo(algo)?;
+        let pem_data = load_private_key_pem(self.keydir, keyname, self.keyfile)?;
+        let pem_str = std::str::from_utf8(&pem_data)
+            .map_err(|_| MkImageError::FitError("key file is not valid UTF-8".into()))?;
+
+        if crypto_algo.starts_with("rsa") {
+            sign_rsa(hash_algo, data, pem_str)
+        } else if crypto_algo.starts_with("ecdsa") || crypto_algo == "secp521r1" {
+            sign_ecdsa(hash_algo, crypto_algo, data, pem_str)
+        } else {
+            Err(MkImageError::FitError(format!(
+                "unsupported crypto algorithm: {crypto_algo}"
+            )))
+        }
+    }
+}
+
 /// Default image types to sign when `sign-images` is absent (matches U-Boot).
 const DEFAULT_SIGN_IMAGES: &[&str] = &["kernel", "fdt", "script"];
 /// Properties to exclude from FDT regions during config signing.
@@ -272,6 +314,15 @@ pub struct FitParams {
 
 /// Main FIT file processing — mirrors U-Boot's `fit_handle_file()`.
 pub fn fit_handle_file(params: &FitParams) -> Result<()> {
+    let signer = DefaultFitSigner {
+        keydir: params.keydir.as_deref(),
+        keyfile: params.keyfile.as_deref(),
+    };
+    fit_handle_file_with_signer(params, &signer)
+}
+
+/// Like [`fit_handle_file`], but uses a custom [`FitSigner`] for signing.
+pub fn fit_handle_file_with_signer(params: &FitParams, signer: &dyn FitSigner) -> Result<()> {
     let tmpfile = format!("{}.tmp", params.imagefile);
 
     // Step 1: compile .its or copy existing FIT
@@ -290,7 +341,7 @@ pub fn fit_handle_file(params: &FitParams) -> Result<()> {
     }
 
     // Step 2: add hashes and signatures in-place
-    fit_add_verification_data(params, &tmpfile)?;
+    fit_add_verification_data(params, &tmpfile, signer)?;
 
     // Step 3: move to final location
     fs::rename(&tmpfile, &params.imagefile).map_err(|e| {
@@ -358,7 +409,7 @@ fn fdt_open_into(dtb: &mut Vec<u8>, new_totalsize: usize) {
 }
 
 /// Read the DTB, modify it in-place, write it back.
-fn fit_add_verification_data(params: &FitParams, tmpfile: &str) -> Result<()> {
+fn fit_add_verification_data(params: &FitParams, tmpfile: &str, signer: &dyn FitSigner) -> Result<()> {
     let mut dtb = fs::read(tmpfile)?;
     dtb::fdt_check_header(&dtb)?;
 
@@ -387,11 +438,11 @@ fn fit_add_verification_data(params: &FitParams, tmpfile: &str) -> Result<()> {
     dtb::fdt_setprop_u32(&mut dtb, root_off, FIT_TIMESTAMP_PROP, timestamp)?;
 
     // Process image nodes
-    process_images(&mut dtb, params, signing)?;
+    process_images(&mut dtb, params, signing, signer)?;
 
     // Process config signatures
     if signing {
-        process_configs(&mut dtb, params)?;
+        process_configs(&mut dtb, params, signer)?;
     }
 
     // Write exactly totalsize bytes (matching mkimage's behavior — the file
@@ -405,7 +456,7 @@ fn fit_add_verification_data(params: &FitParams, tmpfile: &str) -> Result<()> {
 // Image node processing (hashes + image-level signatures)
 // ---------------------------------------------------------------------------
 
-fn process_images(dtb: &mut Vec<u8>, params: &FitParams, signing: bool) -> Result<()> {
+fn process_images(dtb: &mut Vec<u8>, params: &FitParams, signing: bool, signer: &dyn FitSigner) -> Result<()> {
     let images_off = match dtb::fdt_path_offset(dtb, FIT_IMAGES_PATH) {
         Some(o) => o,
         None => return Ok(()),
@@ -478,13 +529,7 @@ fn process_images(dtb: &mut Vec<u8>, params: &FitParams, signing: bool) -> Resul
                     None => continue,
                 };
 
-                let sig = sign_regions(
-                    &algo,
-                    &[&data],
-                    params.keydir.as_deref(),
-                    &keyname,
-                    params.keyfile.as_deref(),
-                )?;
+                let sig = signer.sign(&algo, &data, &keyname)?;
 
                 write_sig_props(dtb, &sub_path, &sig, params, None)?;
 
@@ -558,7 +603,7 @@ fn write_sig_props(
 // Config signature processing
 // ---------------------------------------------------------------------------
 
-fn process_configs(dtb: &mut Vec<u8>, params: &FitParams) -> Result<()> {
+fn process_configs(dtb: &mut Vec<u8>, params: &FitParams, signer: &dyn FitSigner) -> Result<()> {
     let confs_off = match dtb::fdt_path_offset(dtb, FIT_CONFS_PATH) {
         Some(o) => o,
         None => return Ok(()),
@@ -591,7 +636,7 @@ fn process_configs(dtb: &mut Vec<u8>, params: &FitParams) -> Result<()> {
         }
 
         for sig_name in sig_names {
-            process_one_config_sig(dtb, params, &conf_name, &sig_name)?;
+            process_one_config_sig(dtb, params, &conf_name, &sig_name, signer)?;
         }
     }
 
@@ -603,6 +648,7 @@ fn process_one_config_sig(
     params: &FitParams,
     conf_name: &str,
     sig_name: &str,
+    signer: &dyn FitSigner,
 ) -> Result<()> {
     let sig_path = format!("{}/{}/{}", FIT_CONFS_PATH, conf_name, sig_name);
     let sig_off = match dtb::fdt_path_offset(dtb, &sig_path) {
@@ -713,20 +759,14 @@ fn process_one_config_sig(
         )));
     }
 
-    // Collect region byte slices
-    let region_slices: Vec<&[u8]> = regions
-        .iter()
-        .map(|r| &dtb[r.offset..r.offset + r.size])
-        .collect();
+    // Collect region data into a single buffer
+    let mut combined = Vec::new();
+    for r in &regions {
+        combined.extend_from_slice(&dtb[r.offset..r.offset + r.size]);
+    }
 
     // Sign
-    let sig = sign_regions(
-        &algo,
-        &region_slices,
-        params.keydir.as_deref(),
-        &keyname,
-        params.keyfile.as_deref(),
-    )?;
+    let sig = signer.sign(&algo, &combined, &keyname)?;
 
     // Build hashed-nodes value (null-separated list)
     let mut hashed_nodes_val = Vec::new();
